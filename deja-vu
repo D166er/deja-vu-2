@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+import sys
+import shelve
+import os
+
+DB_PATH = os.path.expanduser("~/.deja-vu.db")
+
+# Mapeamento de opções curtas para longas
+ALIASES = {
+    "-a": "--add",
+    "-c": "--combine",
+    "-s": "--show",
+    "-l": "--list",
+    "-r": "--remove",
+    "-f": "--force",
+    "-h": "--help",
+}
+
+def normalize_args(args):
+    """Converte opções curtas para longas para padronizar o parsing."""
+    normalized = []
+    for arg in args:
+        normalized.append(ALIASES.get(arg, arg))
+    return normalized
+
+def expand_combined(name, db, visited=None):
+    if visited is None:
+        visited = set()
+    if name in visited:
+        raise ValueError(f"Loop detectado envolvendo '{name}'.")
+    visited.add(name)
+
+    if name not in db:
+        raise KeyError(f"'{name}' não encontrado.")
+
+    entry = db[name]
+    if entry["type"] == "simple":
+        return [entry["value"]]
+    else:
+        commands = []
+        for ref in entry["value"]:
+            commands.extend(expand_combined(ref, db, visited.copy()))
+        return commands
+
+def add_simple(name, command, db):
+    db[name] = {"type": "simple", "value": command}
+    print(f"Alias '{name}' adicionado.")
+
+def add_combined(name, refs, db):
+    missing = [r for r in refs if r not in db]
+    if missing:
+        print(f"Erro: os seguintes aliases não existem: {', '.join(missing)}")
+        print(f"Não foi possível criar '{name}'.")
+        return
+    try:
+        for r in refs:
+            expand_combined(r, db, visited={name})
+        db[name] = {"type": "combined", "value": refs}
+        print(f"Alias combinado '{name}' adicionado.")
+    except ValueError as e:
+        print(f"Erro: {e}")
+        print(f"Não foi possível criar '{name}'.")
+
+def show_alias(name, db):
+    if name not in db:
+        print(f"'{name}' não encontrado.")
+        return
+    try:
+        commands = expand_combined(name, db)
+        print("\n".join(commands))
+    except ValueError as e:
+        print(f"Erro: {e}")
+
+def list_aliases(db):
+    for name, entry in db.items():
+        if entry["type"] == "simple":
+            print(f"{name}: {entry['value']}")
+        else:
+            refs = entry["value"]
+            if len(refs) > 1:
+                print(f"{name}: [ {refs[0]}, ... ]")
+            elif refs:
+                print(f"{name}: [ {refs[0]} ]")
+            else:
+                print(f"{name}: [ vazio ]")
+
+def remove_alias(name, db, force=False):
+    if name not in db:
+        print(f"Erro: '{name}' não existe.")
+        return
+
+    if not force:
+        dependents = [k for k, v in db.items() if v["type"] == "combined" and name in v["value"]]
+        if dependents:
+            print(f"Erro: '{name}' é usado por {', '.join(dependents)}. Remova-os primeiro ou use --remove --force.")
+            return
+        del db[name]
+        print(f"Alias '{name}' removido com sucesso.")
+    else:
+        to_remove = set()
+        def collect_dependents(alias):
+            if alias in to_remove:
+                return
+            to_remove.add(alias)
+            for k, v in db.items():
+                if v["type"] == "combined" and alias in v["value"]:
+                    collect_dependents(k)
+        collect_dependents(name)
+        for alias in to_remove:
+            if alias in db:
+                del db[alias]
+        print("Removidos:", ", ".join(sorted(to_remove)))
+
+def main():
+    args = normalize_args(sys.argv[1:])
+    if not args or "--help" in args:
+        print("Uso:")
+        print("  deja-vu -a/--add NOME -- COMANDO")
+        print("  deja-vu -a/--add NOME -c/--combine alias1,alias2")
+        print("  deja-vu -s/--show NOME")
+        print("  deja-vu -l/--list")
+        print("  deja-vu -r/--remove NOME")
+        print("  deja-vu -r/--remove -f/--force NOME")
+        return
+
+    with shelve.open(DB_PATH) as db:
+        if "--add" in args:
+            idx = args.index("--add")
+            if idx + 1 >= len(args):
+                print("Erro: nenhum nome fornecido.")
+                return
+            name_parts, refs = [], []
+            i = idx + 1
+            while i < len(args) and args[i] not in ("--", "--combine"):
+                name_parts.append(args[i])
+                i += 1
+            name = " ".join(name_parts)
+            if i < len(args) and args[i] == "--":
+                command = " ".join(args[i+1:])
+                add_simple(name, command, db)
+            elif i < len(args) and args[i] == "--combine":
+                refs = [x.strip() for x in " ".join(args[i+1:]).split(",") if x.strip()]
+                add_combined(name, refs, db)
+            else:
+                print("Erro: formato inválido para --add.")
+        elif "--show" in args:
+            idx = args.index("--show")
+            name = " ".join(args[idx+1:])
+            show_alias(name, db)
+        elif "--list" in args:
+            list_aliases(db)
+        elif "--remove" in args:
+            force = "--force" in args
+            filtered = [a for a in args if a not in ("--remove", "--force")]
+            if not filtered:
+                print("Erro: nenhum alias informado para remoção.")
+            else:
+                name = " ".join(filtered)
+                remove_alias(name, db, force=force)
+        else:
+            print("Erro: argumento inválido. Use --help para ajuda.")
+
+if __name__ == "__main__":
+    main()
